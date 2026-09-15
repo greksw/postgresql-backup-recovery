@@ -1,7 +1,0 @@
-Для AlmaLinux 9
-Если выдается ошибка отсутствия cifs. В моем случае установка cifs-utils не помогло. Только после установки  kernel-modules-extra появилась поддержка cifs.
-lsmod | grep cifs
-modinfo cifs
-modprobe cifs
-sudo dnf install cifs-utils
-sudo yum install kernel-modules-extra
