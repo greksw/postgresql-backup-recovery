@@ -1,0 +1,24 @@
+# PostgreSQL connection
+PGHOST="127.0.0.1"
+PGPORT="5432"
+PGUSER="postgres"
+
+# Optional password file. Prefer peer authentication for local execution where possible.
+# If a password is required, create this file with mode 0600.
+# Format: hostname:port:database:username:password
+PGPASSFILE="/etc/postgresql-backup-recovery.pgpass"
+
+# Backup destination. Mount remote/NAS storage independently from this script.
+BACKUP_ROOT="/srv/postgresql-backups"
+
+# Delete .dump and matching .sha256 files older than this number of days.
+RETENTION_DAYS="30"
+
+# Prevent concurrent backup runs.
+LOCK_FILE="/run/lock/postgresql-backup-recovery.lock"
+
+# Databases to back up.
+DATABASES=(
+    "app_db"
+    "reporting_db"
+)
