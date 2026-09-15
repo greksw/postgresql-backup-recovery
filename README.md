@@ -1,116 +1,243 @@
-Шаг 1: Установка переменных
+# PostgreSQL Backup & Recovery Toolkit
 
-TIME=`date +"%Y-%m-%d_%H-%M"`
-LOG_FILE="/mnt/pgsql.log"
-MOUNT_POINT1="/mnt/backup/PgSql/pgsql"
-# Telegram Bot API параметры
-TOKEN="22222222:111111111dsdfsgO22222222"
-CHAT_ID="111111111"
-SCRIPT_NAME="Резервное копирование 1c8c_PG_everyday:\Rabota"
+A small operational toolkit for repeatable PostgreSQL logical backups and controlled restores on Linux.
 
-TIME: Определяется текущая дата и время, которые будут использоваться в имени файлов резервных копий.
-LOG_FILE: Путь к файлу журнала, куда будут записываться все события скрипта.
-MOUNT_POINT1: Точка монтирования для сетевой шары, куда будут сохраняться резервные копии.
-TOKEN и CHAT_ID: Токен бота и ID чата в Telegram, куда будут отправляться уведомления.
-SCRIPT_NAME: Имя скрипта, которое будет включено в уведомления для идентификации их источника.
+The project was rebuilt from an older production-oriented backup script into a safer portfolio-grade workflow with explicit configuration, checksum validation, retention, concurrency protection, and guarded restore operations.
 
-Шаг 2: Функция для записи логов и отправки уведомлений
+## What it solves
 
-log_and_notify() {
-    local message="$1"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $message" >> $LOG_FILE
-    curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$SCRIPT_NAME: $message" > /dev/null
-}
+The toolkit covers two related operational tasks:
 
-log_and_notify: Эта функция принимает текст сообщения в качестве аргумента.
-Записывает сообщение с текущим временем в лог-файл.
-Отправляет это же сообщение в Telegram через API.
+- scheduled logical backups of one or more PostgreSQL databases;
+- controlled restoration of a selected dump into a new or explicitly confirmed target database.
 
-Шаг 3: Функция для резервного копирования базы данных
+It intentionally does **not** manage CIFS/NFS mounts, Telegram credentials, or storage passwords. Remote backup storage should be mounted independently by the operating system, systemd, automount, or another infrastructure layer.
 
-backup_and_notify() {
-    local dbname="$1"
-    local output_path="$2"
-    pg_dump -U postgres $dbname | pigz > $output_path
-    if [ $? -eq 0 ]; then
-        log_and_notify "✅ База данных $dbname успешно скопирована."
-    else
-        log_and_notify "❌ Ошибка при копировании базы данных $dbname."
-    fi
-}
+## Design
 
-backup_and_notify: Функция, которая:
-Принимает имя базы данных (dbname) и путь для сохранения резервной копии (output_path).
-Выполняет резервное копирование с помощью pg_dump и сжимает файл с помощью pigz.
-Проверяет статус выполнения команды ($?), и если команда завершилась успешно, отправляет уведомление о том, что база данных успешно скопирована. Если произошла ошибка, отправляется сообщение об ошибке.
+```text
+PostgreSQL
+   |
+   | pg_dump --format=custom
+   v
+local / mounted backup filesystem
+   |
+   +-- database-a/
+   |    +-- 2026-09-15_02-00-00-database-a.dump
+   |    +-- 2026-09-15_02-00-00-database-a.dump.sha256
+   |
+   +-- database-b/
+        +-- ...
 
-Шаг 4: Проверка доступности хоста
+Restore path:
+.dump -> checksum validation -> pg_restore structural validation
+      -> create target DB or explicitly confirmed replacement
+      -> pg_restore --exit-on-error -> connectivity validation
+```
 
-HOST1="192.168.1.2"
-ping -c 1 $HOST1 > /dev/null 2>&1
-HOST1_STATUS=$?
+## Repository structure
 
-HOST1: IP-адрес хоста, который нужно проверить.
-ping: Выполняется команда ping, чтобы проверить, доступен ли хост.
-Если хост отвечает, переменная HOST1_STATUS будет равна 0 (успешно).
-Если нет, то HOST1_STATUS будет отлична от 0 (неудачно).
+```text
+.
+├── README.md
+├── config/
+│   └── postgresql-backup-recovery.conf.example
+├── scripts/
+│   ├── postgresql-backup.sh
+│   └── postgresql-restore.sh
+└── .github/
+    └── workflows/
+        └── lint.yml
+```
 
-Шаг 5: Действия при доступности хоста
+## Safety model
 
-if [ $HOST1_STATUS -eq 0 ]; then
-    log_and_notify "✅ Хост доступен, монтируем шары..."
-    sudo mount -t cifs //192.168.1.2/d$/Rabota $MOUNT_POINT1 -o username=usr1,password=123,domain=workgroup,iocharset=utf8,file_mode=0777,dir_mode=0777
-    MOUNT1_STATUS=$?
+The v2 implementation deliberately avoids several patterns from the legacy scripts:
 
-Проверка доступности хоста: Если хост доступен ($HOST1_STATUS -eq 0):
-Отправляется уведомление, что хост доступен.
-Выполняется монтирование сетевой шары.
-Проверяется статус монтирования ($MOUNT1_STATUS).
+- no database passwords embedded in shell code;
+- no CIFS passwords passed on the command line;
+- no world-writable `0777` backup directories;
+- no automatic `dropdb` during a normal restore;
+- no blind pipeline such as `pg_dump | gzip > file` without validating the result;
+- no backup file publication before `pg_dump` and `pg_restore --list` succeed;
+- no concurrent backup runs against the same configured job.
 
-Шаг 6: Выполнение резервного копирования
+If password authentication is required, use `PGPASSFILE` with file mode `0600`. For local execution, peer authentication is preferable when it fits the environment.
 
-if [ $MOUNT1_STATUS -eq 0 ]; then
-    log_and_notify "✅ Шара успешно примонтирована, выполняем pgbackup script..."
-    
-    # Выполнение бэкапа для всех баз данных
-    backup_and_notify "bueks" "/mnt/backup/PgSql/everyday/bueks/$TIME-bueks.sql.gz"
-    # (другие вызовы backup_and_notify для каждой базы данных)
-    
-    echo "`date +'%Y-%m-%d_%H-%M-%S'` End backup" >> /mnt/backup/PgSql/pgsql-everyday-backup.log
-    
-    # Удаление старых файлов
-    find /mnt/backup/PgSql/everyday -type f -mtime +60 -exec rm -rf {} \;
+## Requirements
 
-    log_and_notify "🔄 Выполняем отмонтирование..."
-    sudo umount $MOUNT_POINT1
-    log_and_notify "✅ Шара успешно отмонтирована."
-else
-    log_and_notify "❌ Не удалось примонтировать шару."
-    
-    # Попытка размонтирования в случае частичного монтирования
-    if mount | grep $MOUNT_POINT1 > /dev/null; then
-        sudo umount $MOUNT_POINT1
-    fi
-fi
+- Linux
+- Bash 4+
+- PostgreSQL client utilities:
+  - `pg_dump`
+  - `pg_restore`
+  - `psql`
+  - `createdb`
+  - `dropdb`
+- `flock`
+- `sha256sum`
 
-Успешное монтирование: Если шара успешно примонтирована ($MOUNT1_STATUS -eq 0):
-Отправляется уведомление об успешном монтировании.
-Выполняется резервное копирование для каждой базы данных с помощью вызова backup_and_notify.
-В конце выполнения записывается сообщение о завершении бэкапа в лог-файл.
-Удаляются резервные копии, которым больше 60 дней.
-Шара отмонтируется, и отправляется уведомление об этом.
-Неудачное монтирование: Если монтирование не удалось:
-Отправляется уведомление о неудаче.
-Если шара была частично примонтирована, выполняется попытка её размонтирования.
+The PostgreSQL client major version should normally be equal to or newer than the server version being backed up.
 
-Шаг 7: Действия при недоступности хоста
+## Installation
 
-else
-    log_and_notify "❌ Хост недоступен."
-fi
+Copy the scripts to a root-managed location:
 
-Недоступность хоста: Если хост не доступен ($HOST1_STATUS -ne 0), отправляется уведомление о недоступности хоста.
+```bash
+sudo install -m 0750 scripts/postgresql-backup.sh /usr/local/sbin/postgresql-backup
+sudo install -m 0750 scripts/postgresql-restore.sh /usr/local/sbin/postgresql-restore
+```
 
-Заключение
-Скрипт последовательно проверяет доступность хоста, монтирует сетевую шару, выполняет резервное копирование баз данных и уведомляет о каждом этапе выполнения, включая успешные действия и ошибки.
+Install the example configuration:
 
+```bash
+sudo install -m 0640 \
+  config/postgresql-backup-recovery.conf.example \
+  /etc/postgresql-backup-recovery.conf
+```
+
+Edit the configuration and replace the example database names and paths.
+
+## Authentication
+
+For local PostgreSQL instances, peer authentication is usually the cleanest option for a service account with only the required privileges.
+
+If a password is required, create `/etc/postgresql-backup-recovery.pgpass`:
+
+```text
+127.0.0.1:5432:*:backup_user:REPLACE_ME
+```
+
+Then restrict it:
+
+```bash
+sudo chmod 0600 /etc/postgresql-backup-recovery.pgpass
+```
+
+Do not commit real `.pgpass` files or credentials to Git.
+
+## Backup
+
+Run manually:
+
+```bash
+sudo /usr/local/sbin/postgresql-backup
+```
+
+Or specify another configuration file:
+
+```bash
+sudo /usr/local/sbin/postgresql-backup /etc/postgresql-backup-recovery.conf
+```
+
+For every configured database, the script:
+
+1. acquires an exclusive `flock` lock;
+2. writes a custom-format dump to a temporary file inside the target filesystem;
+3. validates the dump with `pg_restore --list`;
+4. atomically renames the validated dump into its final filename;
+5. creates a SHA-256 checksum file;
+6. applies the configured retention policy.
+
+Example output:
+
+```text
+/srv/postgresql-backups/app_db/
+├── 2026-09-15_02-00-00-app_db.dump
+└── 2026-09-15_02-00-00-app_db.dump.sha256
+```
+
+## Restore
+
+Restore into a new test database:
+
+```bash
+sudo /usr/local/sbin/postgresql-restore \
+  --backup /srv/postgresql-backups/app_db/2026-09-15_02-00-00-app_db.dump \
+  --database app_db_restore_test
+```
+
+If the target database already exists, the script refuses to overwrite it.
+
+Replacing an existing database requires two explicit flags, including the exact database name:
+
+```bash
+sudo /usr/local/sbin/postgresql-restore \
+  --backup /srv/postgresql-backups/app_db/2026-09-15_02-00-00-app_db.dump \
+  --database app_db \
+  --drop-existing \
+  --confirm app_db
+```
+
+This is intentional protection against accidental destructive restores.
+
+## Validation
+
+Before a backup is published:
+
+```bash
+pg_restore --list backup.dump
+```
+
+A SHA-256 sidecar file is then generated for later integrity verification.
+
+During restore, the toolkit checks:
+
+- custom dump readability;
+- SHA-256 checksum when a sidecar checksum exists;
+- target database safety conditions;
+- `pg_restore --exit-on-error` result;
+- successful connection to the restored database.
+
+A backup should still be considered operationally valid only after periodic restore testing in an isolated environment.
+
+## Scheduling
+
+A typical systemd timer or cron job can invoke `/usr/local/sbin/postgresql-backup`. The script contains its own `flock` protection, so overlapping scheduled executions are rejected.
+
+For production use, systemd units are preferable because they provide explicit identities, dependencies, logging, resource controls, and failure handling.
+
+## Storage
+
+The toolkit expects `BACKUP_ROOT` to already be available.
+
+Examples:
+
+- local ZFS/ext4/XFS storage;
+- NFS mounted by systemd;
+- CIFS mounted through a root-only credentials file;
+- a dedicated backup filesystem replicated or protected independently.
+
+Mount lifecycle and storage credentials are deliberately kept outside the backup script.
+
+## Security considerations
+
+- keep backup files readable only by the backup operator/service account;
+- never use `file_mode=0777` or `dir_mode=0777` for database backup storage;
+- do not expose database passwords in shell arguments or repository files;
+- use a dedicated PostgreSQL role with the minimum required privileges;
+- protect backup storage independently from the database server;
+- test restores regularly;
+- encrypt backup storage or transport when the data classification requires it.
+
+## Limitations
+
+This repository implements logical backup and restore with `pg_dump`/`pg_restore`. It is not a replacement for:
+
+- physical base backups;
+- WAL archiving;
+- Point-in-Time Recovery (PITR);
+- PostgreSQL HA/replication;
+- enterprise backup products.
+
+For large databases or strict RPO/RTO requirements, physical backups and WAL-based recovery should be evaluated.
+
+## Legacy migration
+
+Earlier repository versions mixed PostgreSQL backup logic, CIFS mounting, plaintext credentials, Telegram notifications, and retention in one script. The v2 branch intentionally separates these concerns and removes embedded environment-specific values.
+
+The original Git history is retained to show the evolution from an operational script toward a safer and more reusable design.
+
+## License
+
+A license has not yet been selected. Add one before treating the repository as a reusable open-source project.
